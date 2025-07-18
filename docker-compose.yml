@@ -1,101 +1,191 @@
-version: '3.8'
-
 services:
+  # Zookeeper pour Kafka
   zookeeper:
-    image: confluentinc/cp-zookeeper:7.5.0
+    image: confluentinc/cp-zookeeper:7.3.2
+    hostname: zookeeper
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
-    ports:
-      - "2182:2181"
+      ZOOKEEPER_SERVER_ID: 1
+      ZOOKEEPER_SERVERS: zookeeper:2888:3888
+    networks:
+      - microservices-network
 
+  # Kafka
   kafka:
-    image: confluentinc/cp-kafka:7.5.0
+    image: confluentinc/cp-kafka:7.3.2
+    hostname: kafka
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:19092,EXTERNAL://${DOCKER_HOST_IP:-127.0.0.1}:9092,DOCKER://host.docker.internal:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,DOCKER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+      KAFKA_BROKER_ID: 1
+      KAFKA_LOG4J_LOGGERS: "kafka.controller=INFO,kafka.producer.async.DefaultEventHandler=INFO,state.change.logger=INFO"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_JMX_PORT: 9999
+      KAFKA_JMX_HOSTNAME: ${DOCKER_HOST_IP:-127.0.0.1}
+      KAFKA_AUTHORIZER_CLASS_NAME: kafka.security.authorizer.AclAuthorizer
+      KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: "true"
     depends_on:
       - zookeeper
-    environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-    ports:
-      - "9093:9092"
-      - "29092:29092"
+    networks:
+      - microservices-network
 
+  zipkin:
+    image: openzipkin/zipkin
+    ports:
+      - "9411:9411"
+    networks:
+      - microservices-network
+
+  # Eureka Server
+  eureka-server:
+    build: ./EurekaServer
+    container_name: eureka-server
+    ports:
+      - "8761:8761"
+    environment:
+      - SPRING_APPLICATION_NAME=eureka-server
+      - SERVER_PORT=8761
+    networks:
+      - microservices-network
+
+  # Spring Cloud Config Server
+  config-server:
+    build: ./ConfigServer
+    container_name: config-server
+    ports:
+      - "8889:8889"
+    environment:
+      - SPRING_APPLICATION_NAME=config-server
+      - SERVER_PORT=8889
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka
+    depends_on:
+      - eureka-server
+    networks:
+      - microservices-network
+
+  # API Gateway
+  api-gateway:
+    build: ./ApiGateway
+    container_name: api-gateway
+    ports:
+      - "8081:8081"
+    environment:
+      - SPRING_APPLICATION_NAME=api-gateway
+      - SERVER_PORT=8081
+      - SPRING_PROFILES_ACTIVE=prod
+      - SPRING_CONFIG_IMPORT=configserver:http://config-server:8889
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka
+      - SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI=http://keycloak:8180/realms/CompteTransaction
+    depends_on:
+      - eureka-server
+      - config-server
+      - keycloak
+    networks:
+      - microservices-network
+
+  # Microservice ms-compte (MySQL)
+  ms-compte:
+    build: ./Ms_Compte
+    container_name: ms_compte
+    ports:
+      - "8080:8080"
+    environment:
+      - SPRING_APPLICATION_NAME=ms_compte
+      - SERVER_PORT=8080
+      - SPRING_PROFILES_ACTIVE=prod
+      - SPRING_CONFIG_IMPORT=configserver:http://config-server:8889
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka
+      - SPRING_KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql-db:3306/comptedb?useSSL=false&allowPublicKeyRetrieval=true
+      - SPRING_DATASOURCE_USERNAME=root
+      - SPRING_DATASOURCE_PASSWORD=
+    depends_on:
+      - eureka-server
+      - config-server
+      - api-gateway
+      - kafka
+      - mysql
+    networks:
+      - microservices-network
+
+  # Microservice ms-transaction (MongoDB)
+  ms-transaction:
+    build: ./Ms_Transaction
+    container_name: ms_transaction
+    ports:
+      - "9090:9090"
+    environment:
+      - SPRING_APPLICATION_NAME=ms_transaction
+      - SERVER_PORT=9090
+      - SPRING_PROFILES_ACTIVE=prod
+      - SPRING_CONFIG_IMPORT=configserver:http://config-server:8889
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka
+      - SPRING_KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - SPRING_DATA_MONGODB_URI=mongodb://mongodb:27017/transactionDB
+    depends_on:
+      - eureka-server
+      - config-server
+      - api-gateway
+      - kafka
+      - mongodb
+    networks:
+      - microservices-network
+
+  # MongoDB
+  mongodb:
+    image: mongo:latest
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - microservices-network
+
+  # MySQL
   mysql:
     image: mysql:8.0
-    environment:
-      MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: accountdb
-      MYSQL_USER: user
-      MYSQL_PASSWORD: password
+    container_name: mysql-db
     ports:
-      - "3310:3306"
+      - "3306:3306"
+    environment:
+      - MYSQL_ALLOW_EMPTY_PASSWORD=yes
+      - MYSQL_DATABASE=comptedb
     volumes:
       - mysql_data:/var/lib/mysql
+    networks:
+      - microservices-network
 
-  mongodb:
-    image: mongo:6.0
-    ports:
-      - "27018:27017"
-    volumes:
-      - mongo_data:/data/db
-
+  # Keycloak
   keycloak:
-    image: quay.io/keycloak/keycloak:24.0.3
+    image: quay.io/keycloak/keycloak:latest
+    ports:
+      - "8180:8080"
     environment:
-      KEYCLOAK_ADMIN: admin
-      KEYCLOAK_ADMIN_PASSWORD: admin
-    command: start-dev
-    ports:
-      - "8090:8080"
-
-  eureka-server:
-    build: ./eureka-server/eureka-server
-    ports:
-      - "8762:8761"
-    depends_on:
-      - config-server
-
-  config-server:
-    build: ./config-server/config-server
-    ports:
-      - "8889:8888"
-    depends_on:
-      - kafka
-      - mysql
-      - mongodb
-
-  api-gateway:
-    build: ./api-gateway/api-gateway
-    ports:
-      - "8085:8080"
-    depends_on:
-      - eureka-server
-
-  account-service:
-    build: ./account-service/account-service
-    ports:
-      - "8088:8081"
-    depends_on:
-      - mysql
-      - kafka
-      - eureka-server
-      - config-server
-
-  transaction-service:
-    build: ./transaction-service/transaction-service
-    ports:
-      - "8087:8082"
-    depends_on:
-      - mongodb
-      - kafka
-      - eureka-server
-      - config-server
+      - KEYCLOAK_ADMIN=admin
+      - KEYCLOAK_ADMIN_PASSWORD=admin
+    volumes:
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm.json
+    command:
+      - start-dev
+      - --import-realm
+    networks:
+      - microservices-network
 
 volumes:
   mysql_data:
-  mongo_data: 
+  mongodb_data:
+  keycloak_data:
+
+networks:
+  microservices-network:
+    driver: bridge
